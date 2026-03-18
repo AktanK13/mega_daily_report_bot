@@ -385,6 +385,31 @@ console.log(
  */
 
 const app = express();
+
+// CORS для фронта на Netlify
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  // Разрешаем только твой фронт (можно добавить другие origin при необходимости)
+  if (origin === 'https://megadailyreport.netlify.app') {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+
+  res.header('Vary', 'Origin');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-Requested-With',
+  );
+  res.header('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
+
 app.use(express.json());
 
 // Health-check, чтобы Render видел, что сервис жив
