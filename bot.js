@@ -37,7 +37,7 @@ function escapeHtml(text) {
 }
 
 /**
- * Делает конструкции вида "(tag=https://...)" кликабельными:
+ * Делает конструкции вида "(tag=https://...)"кликабельными:
  * - в Telegram отображается только tag, по клику открывается ссылка.
  */
 function formatReportTextForTelegramHtml(text) {
