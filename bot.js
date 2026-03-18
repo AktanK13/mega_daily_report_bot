@@ -219,6 +219,22 @@ async function findReportByChatAndDate(chatId, date) {
   );
 }
 
+async function findLatestReportByChat(chatId) {
+  const reports = await readJson(REPORTS_FILE, []);
+  const list = reports.filter((r) => r.chat_id === chatId);
+
+  if (list.length === 0) return null;
+
+  list.sort((a, b) => {
+    // created_at is ISO string
+    const ta = a.created_at ? Date.parse(a.created_at) : 0;
+    const tb = b.created_at ? Date.parse(b.created_at) : 0;
+    return tb - ta;
+  });
+
+  return list[0] || null;
+}
+
 
 /**
  * Даты.
@@ -247,56 +263,29 @@ function getYesterdayDateString() {
  * Получить текст вчерашнего отчёта для конкретного чата.
  * Если в "БД" нет отчёта за вчера — вернётся заглушка по шаблону.
  */
-async function getYesterdayReportTextForChat(chatId) {
-  const date = getYesterdayDateString();
-  const report = await findReportByChatAndDate(chatId, date);
-
-  if (report && report.report_text) {
-    return report.report_text;
-  }
-
-  return `/done
-#Отчет_${date}
-- Что делал ?
- (не указано)
-- Что буду делать ?
- (не указано)
-- Какие проблемы?
- нет проблем`;
-}
-
 /**
  * Отправить напоминание для одного конкретного чата.
+ * Логика: берём последний сохранённый отчёт пользователя и предлагаем его.
  */
 async function sendDailyReminderForChat(chatId) {
-  const date = getYesterdayDateString();
-  const existingReport = await findReportByChatAndDate(chatId, date);
-  const yesterdayReport = existingReport
-    ? existingReport.report_text
-    : await getYesterdayReportTextForChat(chatId);
+  const latest = await findLatestReportByChat(chatId);
 
   const reminderText =
     'Пора отправить ежедневный отчёт.\n\n' +
-    'Ниже предложен вариант вчерашнего отчёта.\n' +
-    'Можешь скопировать его, отредактировать и отправить в нужный чат.';
+    'Ниже — последний сохранённый отчёт. Можешь отредактировать его на сайте и отправить.';
 
-  const reminderKeyboard = {
-    inline_keyboard: [
-      [
-        {
-          text: '✏️ Редактировать',
-          url: SITE_URL,
-        },
-      ],
-    ],
-  };
+  // Сообщение №1: напоминание БЕЗ кнопок
+  await bot.sendMessage(chatId, reminderText);
 
-  // Сообщение №1: напоминание с кнопками
-  await bot.sendMessage(chatId, reminderText, {
-    reply_markup: reminderKeyboard,
-  });
+  if (!latest || !latest.report_text) {
+    await bot.sendMessage(
+      chatId,
+      'Сохранённых отчётов пока нет. Отправь отчёт с сайта, и завтра утром я предложу его здесь.',
+    );
+    return;
+  }
 
-  // Сообщение №2: текст отчёта + кнопки под самим отчётом
+  // Сообщение №2: последний отчёт + кнопка "Редактировать"
   const reportKeyboard = {
     inline_keyboard: [
       [
@@ -308,7 +297,8 @@ async function sendDailyReminderForChat(chatId) {
     ],
   };
 
-  await bot.sendMessage(chatId, formatReportTextForTelegramHtml(yesterdayReport), {
+  const formatted = formatReportTextForTelegramHtml(latest.report_text);
+  await bot.sendMessage(chatId, formatted || escapeHtml(latest.report_text), {
     disable_web_page_preview: true,
     reply_markup: reportKeyboard,
     parse_mode: 'HTML',
