@@ -25,6 +25,59 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 
 const PORT = process.env.PORT || 3000;
 const BOT_USERNAME = process.env.TG_BOT_USERNAME || 'your_bot_username';
+const SITE_URL = 'https://megadailyreport.netlify.app/';
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Делает конструкции вида "(tag=https://...)" кликабельными:
+ * - в Telegram отображается только tag, по клику открывается ссылка.
+ */
+function formatReportTextForTelegramHtml(text) {
+  const src = String(text);
+  let out = '';
+  let last = 0;
+  const re = /\(([^=\s()]+)\s*=\s*(https?:\/\/[^\s()]+)\)/g;
+
+  for (let m = re.exec(src); m; m = re.exec(src)) {
+    out += escapeHtml(src.slice(last, m.index));
+    const tag = m[1];
+    const url = m[2];
+    out += `<a href="${escapeHtml(url)}">${escapeHtml(tag)}</a>`;
+    last = m.index + m[0].length;
+  }
+
+  out += escapeHtml(src.slice(last));
+  return out;
+}
+
+// Простая защита от дублей запросов (на случай двойного клика/двойного submit на фронте).
+// Ключ хранится недолго и нужен только чтобы не отправлять одинаковый отчёт дважды подряд.
+const RECENT_REPORT_TTL_MS = 60 * 1000;
+const recentReportRequests = new Map(); // key -> timestamp
+
+function pruneRecentReportRequests(nowMs) {
+  for (const [key, ts] of recentReportRequests.entries()) {
+    if (nowMs - ts > RECENT_REPORT_TTL_MS) {
+      recentReportRequests.delete(key);
+    }
+  }
+}
+
+function makeReportDedupeKey({ userId, date, text }) {
+  const hash = crypto
+    .createHash('sha256')
+    .update(`${userId}\n${date}\n${text}`, 'utf8')
+    .digest('hex');
+  return hash;
+}
 
 // Initialize Telegram bot in polling mode
 const bot = new TelegramBot(TG_BOT_TOKEN, {
@@ -124,7 +177,7 @@ async function findUserBySiteUserId(siteUserId) {
 
 /**
  * Модель отчётов в файловом хранилище.
- * Каждый отчёт: { chat_id, date, report_text, created_at }.
+ * Каждый отчёт: { id, chat_id, date, report_text, created_at }.
  */
 async function saveReport({ chatId, date, text }) {
   const reports = await readJson(REPORTS_FILE, []);
@@ -133,12 +186,15 @@ async function saveReport({ chatId, date, text }) {
   );
 
   const now = new Date().toISOString();
+  const reportId = idx >= 0 && reports[idx].id ? reports[idx].id : crypto.randomUUID();
 
   if (idx >= 0) {
+    reports[idx].id = reportId;
     reports[idx].report_text = text;
     reports[idx].created_at = now;
   } else {
     reports.push({
+      id: reportId,
       chat_id: chatId,
       date,
       report_text: text,
@@ -147,6 +203,8 @@ async function saveReport({ chatId, date, text }) {
   }
 
   await writeJson(REPORTS_FILE, reports);
+
+  return { id: reportId };
 }
 
 async function findReportByChatAndDate(chatId, date) {
@@ -155,6 +213,7 @@ async function findReportByChatAndDate(chatId, date) {
     reports.find((r) => r.chat_id === chatId && r.date === date) || null
   );
 }
+
 
 /**
  * Даты.
@@ -205,7 +264,11 @@ async function getYesterdayReportTextForChat(chatId) {
  * Отправить напоминание для одного конкретного чата.
  */
 async function sendDailyReminderForChat(chatId) {
-  const yesterdayReport = await getYesterdayReportTextForChat(chatId);
+  const date = getYesterdayDateString();
+  const existingReport = await findReportByChatAndDate(chatId, date);
+  const yesterdayReport = existingReport
+    ? existingReport.report_text
+    : await getYesterdayReportTextForChat(chatId);
 
   const reminderText =
     'Пора отправить ежедневный отчёт.\n\n' +
@@ -216,12 +279,8 @@ async function sendDailyReminderForChat(chatId) {
     inline_keyboard: [
       [
         {
-          text: '📋 Скопировать',
-          callback_data: 'copy_yesterday',
-        },
-        {
           text: '✏️ Редактировать',
-          callback_data: 'edit_yesterday',
+          url: SITE_URL,
         },
       ],
     ],
@@ -237,20 +296,17 @@ async function sendDailyReminderForChat(chatId) {
     inline_keyboard: [
       [
         {
-          text: '📋 Скопировать',
-          callback_data: 'copy_report_text',
-        },
-        {
           text: '✏️ Редактировать',
-          callback_data: 'edit_report_text',
+          url: SITE_URL,
         },
       ],
     ],
   };
 
-  await bot.sendMessage(chatId, yesterdayReport, {
+  await bot.sendMessage(chatId, formatReportTextForTelegramHtml(yesterdayReport), {
     disable_web_page_preview: true,
     reply_markup: reportKeyboard,
+    parse_mode: 'HTML',
   });
 }
 
@@ -317,6 +373,26 @@ bot.onText(/^\/start(?:\s+(.+))?$/, async (msg, match) => {
   }
 });
 
+// /test9 — вручную запустить то же, что в 09:00
+bot.onText(/^\/test9$/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  // Защита: разрешаем только владельцу, если TG_BOT_ID задан
+  if (TG_BOT_ID && String(chatId) !== String(TG_BOT_ID)) {
+    await bot.sendMessage(chatId, 'Эта команда доступна только владельцу бота.');
+    return;
+  }
+
+  try {
+    await bot.sendMessage(chatId, 'Тест: запускаю рассылку как в 09:00...');
+    await sendDailyRemindersForAllUsers();
+    await bot.sendMessage(chatId, 'Готово.');
+  } catch (error) {
+    console.error('Error handling /test9:', error);
+    await bot.sendMessage(chatId, 'Ошибка при выполнении /test9. Смотри логи.');
+  }
+});
+
 // Любое сообщение с отчётом, например начинающееся с /done
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
@@ -357,31 +433,7 @@ bot.on('callback_query', async (query) => {
   try {
     const { id, data } = query;
 
-    if (data === 'copy_report_text') {
-      const chatId = query.message && query.message.chat && query.message.chat.id;
-      const text = query.message && query.message.text;
-
-      if (chatId && text) {
-        await bot.sendMessage(chatId, text, {
-          disable_web_page_preview: true,
-        });
-      }
-
-      await bot.answerCallbackQuery(id, {
-        text: 'Отправил текст отдельным сообщением ниже — скопируй его.',
-        show_alert: false,
-      });
-    } else if (data === 'edit_report_text') {
-      await bot.answerCallbackQuery(id, {
-        text: 'Отредактируй текст и отправь как новое сообщение.',
-        show_alert: false,
-      });
-    } else if (data === 'copy_yesterday') {
-      await bot.answerCallbackQuery(id, {
-        text: 'Скопируй текст отчёта из сообщения ниже и отправь его в нужный чат.',
-        show_alert: false,
-      });
-    } else if (data === 'edit_yesterday') {
+    if (data === 'edit_yesterday' || data === 'edit_report_text') {
       await bot.answerCallbackQuery(id, {
         text: 'Отредактируй текст вчерашнего отчёта и отправь как новое сообщение.',
         show_alert: false,
@@ -512,6 +564,23 @@ app.post('/api/report', async (req, res) => {
 
     const reportDate = date || getTodayDateString();
 
+    // Дедуп: если прилетел тот же отчёт повторно в течение минуты — не шлём второй раз
+    const nowMs = Date.now();
+    pruneRecentReportRequests(nowMs);
+    const dedupeKey = makeReportDedupeKey({
+      userId: String(userId),
+      date: reportDate,
+      text,
+    });
+    if (recentReportRequests.has(dedupeKey)) {
+      return res.json({
+        ok: true,
+        date: reportDate,
+        deduped: true,
+      });
+    }
+    recentReportRequests.set(dedupeKey, nowMs);
+
     await saveReport({
       chatId: user.chat_id,
       date: reportDate,
@@ -522,20 +591,17 @@ app.post('/api/report', async (req, res) => {
       inline_keyboard: [
         [
           {
-            text: '📋 Скопировать',
-            callback_data: 'copy_report_text',
-          },
-          {
             text: '✏️ Редактировать',
-            callback_data: 'edit_report_text',
+            url: SITE_URL,
           },
         ],
       ],
     };
 
-    await bot.sendMessage(user.chat_id, text, {
+    await bot.sendMessage(user.chat_id, formatReportTextForTelegramHtml(text), {
       reply_markup: keyboard,
       disable_web_page_preview: true,
+      parse_mode: 'HTML',
     });
 
     res.json({
