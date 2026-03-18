@@ -44,13 +44,18 @@ function formatReportTextForTelegramHtml(text) {
   const src = String(text);
   let out = '';
   let last = 0;
-  const re = /\(([^=\s()]+)\s*=\s*(https?:\/\/[^\s()]+)\)/g;
+  // Matches formats like:
+  // (jira=https://...)
+  // (jira = https://... )
+  // ( jira = https://... )
+  const re = /\(\s*([^\s=()]+)\s*=\s*(https?:\/\/[^\s()]+)\s*\)/g;
 
   for (let m = re.exec(src); m; m = re.exec(src)) {
     out += escapeHtml(src.slice(last, m.index));
     const tag = m[1];
     const url = m[2];
-    out += `<a href="${escapeHtml(url)}">${escapeHtml(tag)}</a>`;
+    // Display only "(tag)" while making it clickable.
+    out += `(<a href="${escapeHtml(url)}">${escapeHtml(tag)}</a>)`;
     last = m.index + m[0].length;
   }
 
