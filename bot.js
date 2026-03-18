@@ -212,7 +212,7 @@ async function sendDailyReminderForChat(chatId) {
     'Ниже предложен вариант вчерашнего отчёта.\n' +
     'Можешь скопировать его, отредактировать и отправить в нужный чат.';
 
-  const keyboard = {
+  const reminderKeyboard = {
     inline_keyboard: [
       [
         {
@@ -229,12 +229,28 @@ async function sendDailyReminderForChat(chatId) {
 
   // Сообщение №1: напоминание с кнопками
   await bot.sendMessage(chatId, reminderText, {
-    reply_markup: keyboard,
+    reply_markup: reminderKeyboard,
   });
 
-  // Сообщение №2: текст отчёта
+  // Сообщение №2: текст отчёта + кнопки под самим отчётом
+  const reportKeyboard = {
+    inline_keyboard: [
+      [
+        {
+          text: '📋 Скопировать',
+          callback_data: 'copy_report_text',
+        },
+        {
+          text: '✏️ Редактировать',
+          callback_data: 'edit_report_text',
+        },
+      ],
+    ],
+  };
+
   await bot.sendMessage(chatId, yesterdayReport, {
     disable_web_page_preview: true,
+    reply_markup: reportKeyboard,
   });
 }
 
@@ -341,7 +357,26 @@ bot.on('callback_query', async (query) => {
   try {
     const { id, data } = query;
 
-    if (data === 'copy_yesterday') {
+    if (data === 'copy_report_text') {
+      const chatId = query.message && query.message.chat && query.message.chat.id;
+      const text = query.message && query.message.text;
+
+      if (chatId && text) {
+        await bot.sendMessage(chatId, text, {
+          disable_web_page_preview: true,
+        });
+      }
+
+      await bot.answerCallbackQuery(id, {
+        text: 'Отправил текст отдельным сообщением ниже — скопируй его.',
+        show_alert: false,
+      });
+    } else if (data === 'edit_report_text') {
+      await bot.answerCallbackQuery(id, {
+        text: 'Отредактируй текст и отправь как новое сообщение.',
+        show_alert: false,
+      });
+    } else if (data === 'copy_yesterday') {
       await bot.answerCallbackQuery(id, {
         text: 'Скопируй текст отчёта из сообщения ниже и отправь его в нужный чат.',
         show_alert: false,
@@ -488,11 +523,11 @@ app.post('/api/report', async (req, res) => {
         [
           {
             text: '📋 Скопировать',
-            callback_data: 'copy_yesterday',
+            callback_data: 'copy_report_text',
           },
           {
             text: '✏️ Редактировать',
-            callback_data: 'edit_yesterday',
+            callback_data: 'edit_report_text',
           },
         ],
       ],
