@@ -2,6 +2,8 @@ require('dotenv').config();
 
 const fs = require('fs').promises;
 const path = require('path');
+const express = require('express');
+const crypto = require('crypto');
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
 
@@ -20,6 +22,9 @@ if (!TG_BOT_TOKEN) {
 const DATA_DIR = __dirname;
 const REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+
+const PORT = process.env.PORT || 3000;
+const BOT_USERNAME = process.env.TG_BOT_USERNAME || 'your_bot_username';
 
 // Initialize Telegram bot in polling mode
 const bot = new TelegramBot(TG_BOT_TOKEN, {
@@ -87,6 +92,34 @@ async function getAllUserChatIds() {
   }
 
   return Array.from(ids);
+}
+
+async function createOrUpdateLinkTokenForUser(siteUserId) {
+  const users = await readJson(USERS_FILE, []);
+  const now = new Date().toISOString();
+  const token = crypto.randomUUID();
+
+  const idx = users.findIndex((u) => u.user_id === siteUserId);
+
+  if (idx >= 0) {
+    users[idx].token = token;
+  } else {
+    users.push({
+      user_id: siteUserId,
+      token,
+      chat_id: null,
+      linked_at: null,
+      created_at: now,
+    });
+  }
+
+  await writeJson(USERS_FILE, users);
+  return token;
+}
+
+async function findUserBySiteUserId(siteUserId) {
+  const users = await readJson(USERS_FILE, []);
+  return users.find((u) => u.user_id === siteUserId) || null;
 }
 
 /**
@@ -346,4 +379,117 @@ cron.schedule(
 console.log(
   'Telegram reminder bot started. Waiting for cron schedule (09:00, Mon–Fri).',
 );
+
+/**
+ * HTTP API (Express) для интеграции с сайтом (Netlify).
+ */
+
+const app = express();
+app.use(express.json());
+
+// Health-check, чтобы Render видел, что сервис жив
+app.get('/', (req, res) => {
+  res.send('OK: mega-daily-report-bot is running');
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+/**
+ * POST /api/link-tg
+ * Тело: { "userId": "site_user_id" }
+ * Ответ: { "token": "...", "botLink": "https://t.me/<bot>?start=..." }
+ */
+app.post('/api/link-tg', async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const token = await createOrUpdateLinkTokenForUser(String(userId));
+
+    const botLink = `https://t.me/${BOT_USERNAME}?start=${encodeURIComponent(
+      token,
+    )}`;
+
+    res.json({
+      token,
+      botLink,
+    });
+  } catch (error) {
+    console.error('Error in /api/link-tg:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/report
+ * Тело: { "userId": "site_user_id", "text": "отчёт", "date": "YYYY-MM-DD" (опционально) }
+ * Действия:
+ * - находит пользователя по userId
+ * - если есть chat_id, сохраняет отчёт в "БД"
+ * - отправляет отчёт в Telegram с кнопками
+ */
+app.post('/api/report', async (req, res) => {
+  try {
+    const { userId, text, date } = req.body || {};
+
+    if (!userId || !text) {
+      return res.status(400).json({ error: 'userId and text are required' });
+    }
+
+    const user = await findUserBySiteUserId(String(userId));
+
+    if (!user || !user.chat_id) {
+      return res.status(400).json({
+        error:
+          'Telegram is not linked for this user yet. Ask user to connect Telegram first.',
+      });
+    }
+
+    const reportDate = date || getTodayDateString();
+
+    await saveReport({
+      chatId: user.chat_id,
+      date: reportDate,
+      text,
+    });
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          {
+            text: '📋 Скопировать',
+            callback_data: 'copy_yesterday',
+          },
+          {
+            text: '✏️ Редактировать',
+            callback_data: 'edit_yesterday',
+          },
+        ],
+      ],
+    };
+
+    await bot.sendMessage(user.chat_id, text, {
+      reply_markup: keyboard,
+      disable_web_page_preview: true,
+    });
+
+    res.json({
+      ok: true,
+      date: reportDate,
+    });
+  } catch (error) {
+    console.error('Error in /api/report:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`HTTP API server listening on port ${PORT}`);
+});
+
 
